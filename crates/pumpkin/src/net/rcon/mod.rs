@@ -39,7 +39,7 @@ impl RCONServer {
         while !SHOULD_STOP.load(Ordering::Relaxed) {
             let await_new_client = || async {
                 let t1 = listener.accept();
-                let t2 = STOP_INTERRUPT.cancelled();
+                let t2 = (*STOP_INTERRUPT.load_full()).clone().cancelled_owned();
 
                 select! {
                     client = t1 => Some(client),

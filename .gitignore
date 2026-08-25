@@ -157,3 +157,11 @@ version_history.json
 world_nether/
 world_the_end/
 patchbukkit/
+
+# Xcode user state
+xcuserdata/
+.build-logs/
+
+# iOS web UI build artifacts
+ios/webapp/node_modules/
+ios/webapp/dist/

@@ -72,7 +72,7 @@ impl LANBroadcast {
 
         while !SHOULD_STOP.load(Ordering::Relaxed) {
             let t1 = interval.tick();
-            let t2 = STOP_INTERRUPT.cancelled();
+            let t2 = (*STOP_INTERRUPT.load_full()).clone().cancelled_owned();
 
             let should_continue = select! {
                 _ = t1 => true,

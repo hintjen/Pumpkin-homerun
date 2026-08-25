@@ -16,6 +16,8 @@ LegalCopyright = "Copyright © 2026 Aleksander Medvedev"
 # Required to expose pumpkin plugin API
 [lib]
 doctest = false
+# rlib for the workspace binary; staticlib for the iOS FFI entry points
+crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 # pumpkin
@@ -92,8 +94,7 @@ tracing-subscriber.workspace = true
 
 time = { workspace = true, features = ["parsing", "macros", "local-offset"] }
 
-# plugins
-libloading.workspace = true
+# libloading is handled in a target-specific section below (not available on iOS)
 rustc-hash.workspace = true
 
 # Task handling
@@ -126,6 +127,14 @@ indexmap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# Native plugin loading (dlopen) is unavailable on iOS
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+libloading.workspace = true
+
+# FSEvents-backed file watching is macOS-only; iOS uses the poll backend
+[target.'cfg(target_os = "macos")'.dependencies]
+notify = { workspace = true, features = ["macos_fsevent"] }
 
 [features]
 console-subscriber = ["dep:console-subscriber"]

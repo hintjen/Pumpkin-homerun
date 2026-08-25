@@ -22,6 +22,7 @@ use crate::net::{ClientPlatform, DisconnectReason, PacketHandlerResult, PacketRa
 use crate::net::{lan_broadcast::LANBroadcast, query, rcon::RCONServer};
 use crate::plugin::server::server_command::ServerCommandEvent;
 use crate::server::{Server, ticker::Ticker};
+use arc_swap::ArcSwap;
 use plugin::server::server_load::{LoadType, ServerLoadEvent};
 use pumpkin_config::{AdvancedConfiguration, BasicConfiguration};
 use pumpkin_util::text::TextComponent;
@@ -47,6 +48,13 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+#[cfg(target_os = "ios")]
+pub mod ios;
+// Compiled under `cfg(test)` on every host too, so the one piece of the iOS
+// bridge with real logic stays covered by ordinary CI. See the module docs.
+#[cfg(any(target_os = "ios", test))]
+mod log_ring;
 
 pub mod block;
 pub mod command;
@@ -75,6 +83,12 @@ pub static LOGGER_IMPL: LazyLock<Arc<OnceLock<LoggerOption>>> =
 pub fn init_logger(advanced_config: &AdvancedConfiguration) {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt;
+
+    // On iOS the server can be restarted in-process; skip re-init so we don't
+    // panic trying to set the global tracing subscriber a second time.
+    if LOGGER_IMPL.get().is_some() {
+        return;
+    }
 
     let logger = advanced_config.logging.enabled.then(|| {
         let level = std::env::var("RUST_LOG")
@@ -190,14 +204,24 @@ pub fn init_logger(advanced_config: &AdvancedConfiguration) {
 }
 
 pub static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
-pub static STOP_INTERRUPT: LazyLock<CancellationToken> = LazyLock::new(CancellationToken::new);
+pub static STOP_INTERRUPT: LazyLock<ArcSwap<CancellationToken>> =
+    LazyLock::new(|| ArcSwap::new(Arc::new(CancellationToken::new())));
 pub static SERVER_IS_STOPPING: AtomicBool = AtomicBool::new(false);
 pub static CRASH_REPORT: OnceLock<CrashReport> = OnceLock::new();
 pub static SERVER_EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 pub fn stop_server() {
     SHOULD_STOP.store(true, Ordering::Relaxed);
-    STOP_INTERRUPT.cancel();
+    STOP_INTERRUPT.load().cancel();
+}
+
+/// Reset server state so `pumpkin_start` can be called again in the same process.
+/// Only needed on platforms (iOS) where the server restarts in-process.
+pub fn reset_server_state() {
+    SHOULD_STOP.store(false, Ordering::Relaxed);
+    SERVER_IS_STOPPING.store(false, Ordering::Release);
+    SERVER_EXIT_CODE.store(0, Ordering::Release);
+    STOP_INTERRUPT.store(Arc::new(CancellationToken::new()));
 }
 
 pub fn stop_or_exit_server() {
@@ -230,11 +254,18 @@ impl PumpkinServer {
     pub fn log_info(&self, message: &str) {
         tracing::info!(target: "plugin", "{}", message);
     }
+    /// Build the server and bind its sockets.
+    ///
+    /// Returns the bind error rather than terminating the process. The
+    /// standalone binary turns that into an exit itself (see `main.rs`), but an
+    /// embedded host — the iOS and Android apps link this as a library — cannot
+    /// survive `process::exit`, and a taken port is an ordinary, recoverable
+    /// condition there rather than a fatal one.
     pub async fn new(
         basic_config: BasicConfiguration,
         advanced_config: AdvancedConfiguration,
         vanilla_data: VanillaData,
-    ) -> Self {
+    ) -> Result<Self, std::io::Error> {
         let server = Server::new(basic_config, advanced_config, vanilla_data).await;
 
         let rcon = server.advanced_config.networking.rcon.clone();
@@ -254,26 +285,27 @@ impl PumpkinServer {
             // Setup the TCP server socket.
             let listener = match TcpListener::bind(address).await {
                 Ok(l) => l,
-                Err(e) => match e.kind() {
-                    ErrorKind::AddrInUse => {
-                        error!("Error: Address {address} is already in use.");
-                        error!("Make sure another instance of the server isn't already running");
-                        std::process::exit(1);
+                Err(e) => {
+                    match e.kind() {
+                        ErrorKind::AddrInUse => {
+                            error!("Error: Address {address} is already in use.");
+                            error!(
+                                "Make sure another instance of the server isn't already running"
+                            );
+                        }
+                        ErrorKind::PermissionDenied => {
+                            error!("Error: Permission denied when binding to {address}.");
+                            error!("You might need sudo/admin privileges to use ports below 1024");
+                        }
+                        ErrorKind::AddrNotAvailable => {
+                            error!("Error: The address {address} is not available on this machine");
+                        }
+                        _ => {
+                            error!("Failed to start TcpListener on {address}: {e}");
+                        }
                     }
-                    ErrorKind::PermissionDenied => {
-                        error!("Error: Permission denied when binding to {address}.");
-                        error!("You might need sudo/admin privileges to use ports below 1024");
-                        std::process::exit(1);
-                    }
-                    ErrorKind::AddrNotAvailable => {
-                        error!("Error: The address {address} is not available on this machine");
-                        std::process::exit(1);
-                    }
-                    _ => {
-                        error!("Failed to start TcpListener on {address}: {e}");
-                        std::process::exit(1);
-                    }
-                },
+                    return Err(e);
+                }
             };
             // In the event the user puts 0 for their port, this will allow us to know what port it is running on
             let addr = listener.local_addr().unwrap_or_else(|_| {
@@ -314,12 +346,12 @@ impl PumpkinServer {
         let (bedrock_status, ice_socket) = Self::bind_bedrock_status(&server).await;
         let nethernet_listener = Self::bind_nethernet(&server, ice_socket).await;
 
-        Self {
+        Ok(Self {
             server,
             tcp_listener,
             bedrock_status,
             nethernet_listener,
-        }
+        })
     }
 
     async fn bind_nethernet(
@@ -651,7 +683,7 @@ impl PumpkinServer {
             },
 
             // Branch for the global stop signal
-            () = STOP_INTERRUPT.cancelled() => {
+            () = (*STOP_INTERRUPT.load_full()).clone().cancelled_owned() => {
                 return false;
             }
         }
@@ -784,7 +816,7 @@ fn setup_console(mut rl: Editor<PumpkinCommandCompleter, FileHistory>, server: A
     server.clone().spawn_task(async move {
         while !SHOULD_STOP.load(Ordering::Relaxed) {
             let t1 = rx.recv();
-            let t2 = STOP_INTERRUPT.cancelled();
+            let t2 = (*STOP_INTERRUPT.load_full()).clone().cancelled_owned();
 
             let result = select! {
                 line = t1 => line,

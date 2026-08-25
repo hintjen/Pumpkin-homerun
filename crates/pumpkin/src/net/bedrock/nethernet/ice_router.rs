@@ -103,7 +103,7 @@ async fn run(
 
     loop {
         tokio::select! {
-            () = STOP_INTERRUPT.cancelled() => break,
+            () = (*STOP_INTERRUPT.load_full()).clone().cancelled_owned() => break,
             Some(command) = commands.recv() => match command {
                 Command::Register { ufrag, internal, candidates } => {
                     if let Some(old) = routes.insert(internal, Route {

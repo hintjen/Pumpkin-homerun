@@ -111,7 +111,13 @@ async fn main() {
         }
     });
 
-    let pumpkin_server = PumpkinServer::new(config.basic, config.advanced, vanilla_data).await;
+    // The standalone binary exits on a bind failure, as it always has. The
+    // decision moved out of `PumpkinServer::new` so that embedded hosts, which
+    // cannot survive `process::exit`, can handle it themselves.
+    let Ok(pumpkin_server) = PumpkinServer::new(config.basic, config.advanced, vanilla_data).await
+    else {
+        std::process::exit(1)
+    };
     let plugin_wait_time = pumpkin_server.init_plugins().await;
 
     let time_elapsed = time.elapsed().saturating_sub(plugin_wait_time);

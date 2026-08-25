@@ -67,7 +67,7 @@ impl Ticker {
 
             tokio::select! {
                 () = sleep_until(next_tick) => {},
-                () = STOP_INTERRUPT.cancelled() => {
+                () = (*STOP_INTERRUPT.load_full()).clone().cancelled_owned() => {
                     break 'ticker;
                 }
             }

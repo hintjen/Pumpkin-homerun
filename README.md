@@ -1,8 +1,28 @@
+> [!IMPORTANT]
+> ### This is not upstream Pumpkin
+>
+> This repository is [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin) carrying a
+> small set of changes that let the server run as a **library inside a mobile
+> app**, where it cannot own stdout, cannot own the process, and on iOS cannot
+> be a process at all. In short:
+>
+> - `PumpkinServer::new` returns an error instead of exiting the process
+> - a bounded in-memory log ring, because stdout is invisible on a phone
+> - iOS entry points, with `dlopen` plugin loading off and wasmtime on Pulley
+> - process-wide stop signals made safe to run twice
+>
+> Nothing else. Everything app-shaped lives in the embedding crate instead.
+>
+> **[What each change is for, and why → FORK.md](FORK.md)**
+>
+> Please report Pumpkin bugs to
+> **[Pumpkin-MC/Pumpkin](https://github.com/Pumpkin-MC/Pumpkin)**, not here.
+> Issues here should be about the changes in `FORK.md` and nothing else.
+
 <div align="center">
 
 # Pumpkin
 
-![CI](https://github.com/Pumpkin-MC/Pumpkin/actions/workflows/rust.yml/badge.svg)
 [![Discord](https://img.shields.io/discord/1268592337445978193.svg?label=&logo=discord&logoColor=ffffff&color=7389D8&labelColor=6A7EC2)](https://discord.gg/wT8XjrjKkf)
 [![License: GPL](https://img.shields.io/badge/License-GPLv3-yellow.svg)](https://opensource.org/licenses/gpl-3-0)
 

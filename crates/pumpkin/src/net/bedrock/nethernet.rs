@@ -126,7 +126,7 @@ impl NetherNetListener {
                 listener,
                 router.into_make_service_with_connect_info::<SocketAddr>(),
             )
-            .with_graceful_shutdown(STOP_INTERRUPT.clone().cancelled_owned())
+            .with_graceful_shutdown((*STOP_INTERRUPT.load_full()).clone().cancelled_owned())
             .await;
             if let Err(error) = result {
                 warn!("NetherNet signaling server stopped: {error}");

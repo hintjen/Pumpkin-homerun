@@ -79,6 +79,13 @@ impl PluginRuntime {
         config.wasm_exceptions(true);
         config.wasm_function_references(true);
 
+        // iOS forbids JIT (PROT_EXEC mmap). Use the Pulley interpreter instead:
+        // Cranelift still compiles WASM → Pulley bytecode (AOT), Pulley runs it.
+        #[cfg(target_os = "ios")]
+        config
+            .target("pulley64")
+            .expect("Failed to configure Pulley interpreter target for iOS");
+
         let engine = Engine::new(&config).map_err(PluginInitError::EngineCreationFailed)?;
 
         let linker = setup_linker(&engine).map_err(PluginInitError::LinkerSetupFailed)?;

@@ -1,6 +1,8 @@
 use arc_swap::ArcSwap;
 use futures::future::join_all;
-use loader::{LoaderError, PluginLoader, native::NativePluginLoader};
+#[cfg(not(target_os = "ios"))]
+use loader::native::NativePluginLoader;
+use loader::{LoaderError, PluginLoader};
 use notify::{EventKind, RecursiveMode, Watcher, event::ModifyKind};
 use std::{
     any::Any,
@@ -222,12 +224,16 @@ impl PluginManager {
     /// Create a new plugin manager with default loaders
     #[must_use]
     pub fn new(verify_plugin_signatures: bool) -> Self {
+        // Native (dlopen) plugin loading is unavailable on iOS.
+        #[allow(unused_mut)]
+        let mut loaders: Vec<Arc<dyn PluginLoader>> =
+            vec![Arc::new(WasmPluginLoader::new(verify_plugin_signatures))];
+        #[cfg(not(target_os = "ios"))]
+        loaders.insert(0, Arc::new(NativePluginLoader));
+
         Self {
             plugins: RwLock::new(Vec::new()),
-            loaders: RwLock::new(vec![
-                Arc::new(NativePluginLoader),
-                Arc::new(WasmPluginLoader::new(verify_plugin_signatures)),
-            ]),
+            loaders: RwLock::new(loaders),
             handlers: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             unloaded_files: RwLock::new(HashSet::new()),
             services: Arc::new(RwLock::new(HashMap::new())),
