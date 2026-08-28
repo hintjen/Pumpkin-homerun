@@ -21,8 +21,8 @@ use pumpkin_protocol::{
     bedrock::{
         BEDROCK_GAME_PACKET, SubClient,
         client::{
-            client_cache_miss_response::{CClientCacheMissResponse, CacheBlob},
-            disconnect_player::CDisconnectPlayer,
+            client_cache_miss_response::{CClientCacheMissResponse, MissingBlobData},
+            disconnect::CDisconnect,
             level_chunk::CLevelChunk,
         },
         packet_decoder::BedrockBatchDecoder,
@@ -32,13 +32,13 @@ use pumpkin_protocol::{
             client_cache_blob_status::SClientCacheBlobStatus,
             client_cache_status::SClientCacheStatus, command_request::SCommandRequest,
             container_close::SContainerClose, emote::SEmote, emote_list::SEmoteList,
-            interaction::SInteraction, inventory_transaction::SInventoryTransaction,
+            interact::SInteract, inventory_transaction::SInventoryTransaction,
             loading_screen::SLoadingScreen, login::SLogin, mob_equipment::SMobEquipment,
             packet_violation_warning::SPacketViolationWarning, player_action::SPlayerAction,
             player_auth_input::SPlayerAuthInput, request_ability::SRequestAbility,
             request_chunk_radius::SRequestChunkRadius,
             request_network_settings::SRequestNetworkSettings,
-            resource_pack_response::SResourcePackResponse, respawn::SRespawn,
+            resource_pack_client_response::SResourcePackClientResponse, respawn::SRespawn,
             set_local_player_as_initialized::SSetLocalPlayerAsInitialized,
             set_player_inventory_options::SSetPlayerInventoryOptions, text::SText,
         },
@@ -269,8 +269,18 @@ impl BedrockClient {
             .set_compression((compression.threshold as usize, compression.level));
     }
 
+    pub fn try_kick(&self, reason: DisconnectReason, message: String) {
+        let packet = CDisconnect::new(reason as i32, message);
+        if let Ok(data) = self.serialize_packet(&packet) {
+            self.try_enqueue_packet(data);
+        }
+        if !self.close_token.is_cancelled() {
+            self.close_token.cancel();
+        }
+    }
+
     pub async fn kick(&self, reason: DisconnectReason, message: String) {
-        self.send_packet(&CDisconnectPlayer::new(reason as i32, message))
+        self.send_packet(&CDisconnect::new(reason as i32, message))
             .await;
         self.close().await;
     }
@@ -284,7 +294,7 @@ impl BedrockClient {
         send_packet: bool,
     ) {
         if send_packet {
-            self.send_packet(&CDisconnectPlayer {
+            self.send_packet(&CDisconnect {
                 reason: pumpkin_protocol::codec::var_int::VarInt(reason as i32),
                 skip_message,
                 message,
@@ -333,26 +343,32 @@ impl BedrockClient {
         let cache_enabled = server.advanced_config.networking.bedrock.chunk_caching
             && self.client_cache_supported.load(Ordering::Relaxed);
 
-        let mut serialize_tasks = Vec::with_capacity(valid_chunks.len());
-        for chunk in valid_chunks {
-            let block_actors = player.world().bedrock_chunk_block_actors(&chunk);
-            serialize_tasks.push(tokio::task::spawn_blocking(move || {
-                CLevelChunk::encode_chunk(&chunk, bedrock_dimension, cache_enabled, &block_actors)
-            }));
-        }
-
-        let mut encoded_payloads = Vec::with_capacity(serialize_tasks.len());
-        let mut new_blobs = Vec::new();
-        for task in serialize_tasks {
-            match task.await {
-                Ok(Ok((payload, blobs))) => {
-                    encoded_payloads.push(payload);
-                    new_blobs.extend(blobs);
+        let world = player.world();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        rayon::spawn(move || {
+            let mut encoded_payloads = Vec::with_capacity(valid_chunks.len());
+            let mut new_blobs = Vec::new();
+            for chunk in valid_chunks {
+                let block_actors = world.bedrock_chunk_block_actors(&chunk);
+                match CLevelChunk::encode_chunk(
+                    &chunk,
+                    bedrock_dimension,
+                    cache_enabled,
+                    &block_actors,
+                ) {
+                    Ok((payload, blobs)) => {
+                        encoded_payloads.push(payload);
+                        new_blobs.extend(blobs);
+                    }
+                    Err(e) => error!("Failed to serialize Bedrock chunk: {:?}", e),
                 }
-                Ok(Err(e)) => error!("Failed to serialize Bedrock chunk: {:?}", e),
-                Err(e) => error!("Join error in Bedrock chunk serialization: {:?}", e),
             }
-        }
+            let _ = tx.send((encoded_payloads, new_blobs));
+        });
+
+        let Ok((encoded_payloads, new_blobs)) = rx.await else {
+            return;
+        };
 
         if !new_blobs.is_empty() {
             let mut cache = self.blob_cache.lock().await;
@@ -518,11 +534,8 @@ impl BedrockClient {
         self.close_token.is_cancelled() || self.session.is_closed()
     }
 
-    pub fn enqueue_spawn_packet(self: &Arc<Self>, entity: Arc<dyn crate::entity::EntityBase>) {
-        let client = self.clone();
-        self.spawn_task(async move {
-            entity.send_bedrock_spawn_packet(&client).await;
-        });
+    pub fn enqueue_spawn_packet(&self, entity: &dyn crate::entity::EntityBase) {
+        entity.send_bedrock_spawn_packet(self);
     }
 
     async fn process_batch(
@@ -664,14 +677,14 @@ impl BedrockClient {
             SClientCacheStatus::PACKET_ID => {
                 let packet = SClientCacheStatus::read(reader)?;
                 self.client_cache_supported
-                    .store(packet.cache_supported, Ordering::Relaxed);
+                    .store(packet.is_cache_supported, Ordering::Relaxed);
             }
             SClientCacheBlobStatus::PACKET_ID => {
                 self.handle_client_cache_blob_status(SClientCacheBlobStatus::read(reader)?)
                     .await;
             }
-            SResourcePackResponse::PACKET_ID => {
-                self.handle_resource_pack_response(SResourcePackResponse::read(reader)?, server)
+            SResourcePackClientResponse::PACKET_ID => {
+                self.handle_resource_pack_response(SResourcePackClientResponse::read(reader)?, server)
                     .await;
             }
             SPlayerAuthInput::PACKET_ID => {
@@ -688,8 +701,8 @@ impl BedrockClient {
             pumpkin_protocol::bedrock::server::item_stack_request::SItemStackRequest::PACKET_ID => {
                 self.handle_item_stack_request(player, pumpkin_protocol::bedrock::server::item_stack_request::SItemStackRequest::read(reader)?).await;
             }
-            SInteraction::PACKET_ID => {
-                self.handle_interaction(player, SInteraction::read(reader)?, server)
+            SInteract::PACKET_ID => {
+                self.handle_interaction(player, SInteract::read(reader)?, server)
                     .await;
             }
             SContainerClose::PACKET_ID => {
@@ -722,13 +735,13 @@ impl BedrockClient {
                 self.handle_respawn(player, SRespawn::read(reader)?).await;
             }
             SAnimate::PACKET_ID => {
-                self.handle_animate(player, server, &SAnimate::read(reader)?).await;
+                self.handle_animate(player, server, &SAnimate::read(reader)?);
             }
             SActorEvent::PACKET_ID => {
-                self.handle_actor_event(player, SActorEvent::read(reader)?).await;
+                self.handle_actor_event(player, &SActorEvent::read(reader)?);
             }
             SEmote::PACKET_ID => {
-                self.handle_emote(player, server, SEmote::read_slice(reader)?).await;
+                self.handle_emote(player, server, SEmote::read_slice(reader)?);
             }
             SEmoteList::PACKET_ID => {
                 self.handle_emote_list(player, server, &SEmoteList::read(reader)?);
@@ -751,8 +764,7 @@ impl BedrockClient {
                     .await;
             }
             SRequestAbility::PACKET_ID => {
-                self.handle_request_ability(player, SRequestAbility::read(reader)?)
-                    .await;
+                self.handle_request_ability(player, &SRequestAbility::read(reader)?);
             }
             SMobEquipment::PACKET_ID => {
                 self.handle_mob_equipment(server, player, SMobEquipment::read(reader)?)
@@ -762,9 +774,9 @@ impl BedrockClient {
                 let warning = SPacketViolationWarning::read(reader)?;
                 warn!(
                     violation_type = warning.violation_type.0,
-                    severity = warning.severity.0,
-                    packet_id = warning.packet_id.0,
-                    context = %warning.context,
+                    violation_severity = warning.violation_severity.0,
+                    violation_packet_id = warning.violation_packet_id.0,
+                    violation_context = %warning.violation_context,
                     "Bedrock client rejected a server packet"
                 );
             }
@@ -784,9 +796,9 @@ impl BedrockClient {
             let mut missing_blobs = Vec::with_capacity(packet.miss_hashes.len());
             for hash in packet.miss_hashes {
                 if let Some(payload) = cache.get(&hash) {
-                    missing_blobs.push(CacheBlob {
-                        hash,
-                        payload: payload.clone(),
+                    missing_blobs.push(MissingBlobData {
+                        blob_id: hash,
+                        blob_data: payload.clone(),
                     });
                 } else {
                     warn!("Client requested missing blob {hash:#x} not found in server cache");
@@ -795,10 +807,8 @@ impl BedrockClient {
             missing_blobs
         };
         if !missing_blobs.is_empty() {
-            self.send_packet(&CClientCacheMissResponse {
-                blobs: &missing_blobs,
-            })
-            .await;
+            self.send_packet(&CClientCacheMissResponse { missing_blobs })
+                .await;
         }
     }
 
