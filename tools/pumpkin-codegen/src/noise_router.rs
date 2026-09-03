@@ -566,7 +566,266 @@ enum DensityFunctionRepr {
     },
 }
 
+const AXIS_X: u8 = 1;
+const AXIS_Y: u8 = 2;
+const AXIS_Z: u8 = 4;
+const AXES_XZ: u8 = AXIS_X | AXIS_Z;
+const AXES_ALL: u8 = AXIS_X | AXIS_Y | AXIS_Z;
+
+impl Axis {
+    const fn as_axes(self) -> u8 {
+        match self {
+            Self::X => AXIS_X,
+            Self::Y => AXIS_Y,
+            Self::Z => AXIS_Z,
+        }
+    }
+}
+
+fn noise_domain_axes(xz_scale: f32, y_scale: f32) -> u8 {
+    let mut axes = AXES_ALL;
+    if y_scale == 0.0 {
+        axes &= !AXIS_Y;
+    }
+    if xz_scale == 0.0 {
+        axes &= !AXES_XZ;
+    }
+    axes
+}
+
+impl SplineRepr {
+    fn for_each_function(&mut self, f: &mut dyn FnMut(&mut DensityFunctionRepr)) {
+        if let Self::Standard {
+            location_function,
+            values,
+            ..
+        } = self
+        {
+            f(location_function);
+            for value in values.iter_mut() {
+                value.for_each_function(f);
+            }
+        }
+    }
+
+    fn domain_axes(&self) -> u8 {
+        match self {
+            Self::Fixed { .. } => 0,
+            Self::Standard {
+                location_function,
+                values,
+                ..
+            } => values
+                .iter()
+                .fold(location_function.domain_axes(), |axes, value| {
+                    axes | value.domain_axes()
+                }),
+        }
+    }
+}
+
 impl DensityFunctionRepr {
+    fn domain_axes(&self) -> u8 {
+        match self {
+            Self::Constant { .. } => 0,
+            Self::BlendAlpha
+            | Self::BlendOffset
+            | Self::EndIslands
+            | Self::ShiftA { .. }
+            | Self::ShiftB { .. } => AXES_XZ,
+            Self::Beardifier
+            | Self::InterpolatedNoiseSampler { .. }
+            | Self::DistanceToPoint { .. } => AXES_ALL,
+            Self::ClampedYGradient { .. } => AXIS_Y,
+            Self::Gradient { data } => data.axis.as_axes(),
+            Self::Noise { data } => noise_domain_axes(data.xz_scale.0, data.y_scale.0),
+            Self::ShiftedNoise {
+                shift_x,
+                shift_y,
+                shift_z,
+                data,
+            } => {
+                noise_domain_axes(data.xz_scale.0, data.y_scale.0)
+                    | shift_x.domain_axes()
+                    | shift_y.domain_axes()
+                    | shift_z.domain_axes()
+            }
+            Self::BlendDensity { input }
+            | Self::Wrapper { input, .. }
+            | Self::Linear { input, .. }
+            | Self::Unary { input, .. }
+            | Self::Clamp { input, .. } => input.domain_axes(),
+            Self::Slice { axis, input, .. } => input.domain_axes() & !axis.as_axes(),
+            Self::FindTopSurface {
+                density,
+                upper_bound,
+                ..
+            } => (density.domain_axes() | upper_bound.domain_axes()) & !AXIS_Y,
+            Self::IntervalSelect {
+                input, functions, ..
+            } => functions
+                .iter()
+                .fold(input.domain_axes(), |axes, f| axes | f.domain_axes()),
+            Self::Lerp {
+                alpha,
+                first,
+                second,
+            } => alpha.domain_axes() | first.domain_axes() | second.domain_axes(),
+            Self::Rounding {
+                input, multiple, ..
+            } => input.domain_axes() | multiple.domain_axes(),
+            Self::Binary {
+                argument1,
+                argument2,
+                ..
+            } => argument1.domain_axes() | argument2.domain_axes(),
+            Self::RangeChoice {
+                input,
+                when_in_range,
+                when_out_range,
+                ..
+            } => input.domain_axes() | when_in_range.domain_axes() | when_out_range.domain_axes(),
+            Self::Spline { spline, .. } => spline.domain_axes(),
+        }
+    }
+
+    fn is_cache(&self) -> bool {
+        matches!(
+            self,
+            Self::Wrapper {
+                wrapper: WrapperType::CacheFlat | WrapperType::Cache2D | WrapperType::CacheOnce,
+                ..
+            }
+        )
+    }
+
+    fn for_each_child(&mut self, f: &mut dyn FnMut(&mut Self)) {
+        match self {
+            Self::Beardifier
+            | Self::BlendAlpha
+            | Self::BlendOffset
+            | Self::EndIslands
+            | Self::Noise { .. }
+            | Self::ShiftA { .. }
+            | Self::ShiftB { .. }
+            | Self::InterpolatedNoiseSampler { .. }
+            | Self::Constant { .. }
+            | Self::ClampedYGradient { .. }
+            | Self::Gradient { .. }
+            | Self::DistanceToPoint { .. } => {}
+            Self::BlendDensity { input }
+            | Self::Wrapper { input, .. }
+            | Self::Linear { input, .. }
+            | Self::Unary { input, .. }
+            | Self::Clamp { input, .. }
+            | Self::Slice { input, .. } => f(input),
+            Self::FindTopSurface {
+                density,
+                upper_bound,
+                ..
+            } => {
+                f(density);
+                f(upper_bound);
+            }
+            Self::ShiftedNoise {
+                shift_x,
+                shift_y,
+                shift_z,
+                ..
+            } => {
+                f(shift_x);
+                f(shift_y);
+                f(shift_z);
+            }
+            Self::IntervalSelect {
+                input, functions, ..
+            } => {
+                f(input);
+                for function in functions.iter_mut() {
+                    f(function);
+                }
+            }
+            Self::Lerp {
+                alpha,
+                first,
+                second,
+            } => {
+                f(alpha);
+                f(first);
+                f(second);
+            }
+            Self::Rounding {
+                input, multiple, ..
+            } => {
+                f(input);
+                f(multiple);
+            }
+            Self::Binary {
+                argument1,
+                argument2,
+                ..
+            } => {
+                f(argument1);
+                f(argument2);
+            }
+            Self::RangeChoice {
+                input,
+                when_in_range,
+                when_out_range,
+                ..
+            } => {
+                f(input);
+                f(when_in_range);
+                f(when_out_range);
+            }
+            Self::Spline { spline, .. } => spline.for_each_function(f),
+        }
+    }
+
+    fn existing_removed_axes(&self) -> u8 {
+        let mut axes = 0;
+        let mut function = self;
+        while let Self::Slice { axis, input, .. } = function {
+            axes |= axis.as_axes();
+            function = input;
+        }
+        axes
+    }
+
+    fn remove_axes(&mut self, axes: u8) {
+        let filtered = axes & !self.existing_removed_axes();
+        for (bit, axis) in [(AXIS_X, Axis::X), (AXIS_Z, Axis::Z), (AXIS_Y, Axis::Y)] {
+            if filtered & bit != 0 {
+                let input = std::mem::replace(
+                    self,
+                    Self::Constant {
+                        value: HashableF32(0.0),
+                    },
+                );
+                *self = Self::Slice {
+                    axis,
+                    coordinate: 0,
+                    input: Box::new(input),
+                };
+            }
+        }
+    }
+
+    fn slice_uniform_axes(&mut self, parent_axes: u8) {
+        if matches!(
+            self,
+            Self::Constant { .. } | Self::Gradient { .. } | Self::ClampedYGradient { .. }
+        ) {
+            return;
+        }
+        let axes = self.domain_axes();
+        let child_parent_axes = if self.is_cache() { AXES_ALL } else { axes };
+        self.for_each_child(&mut |child| child.slice_uniform_axes(child_parent_axes));
+        if parent_axes != axes {
+            self.remove_axes(parent_axes & !axes);
+        }
+    }
+
     fn optimize(&mut self) {
         match self {
             Self::BlendDensity { input } => input.optimize(),
@@ -1724,6 +1983,25 @@ struct NoiseRouterRepr {
 }
 
 impl NoiseRouterRepr {
+    fn slice_uniform_axes(&mut self) {
+        self.barrier_noise.slice_uniform_axes(AXES_ALL);
+        self.fluid_level_floodedness_noise
+            .slice_uniform_axes(AXES_ALL);
+        self.fluid_level_spread_noise.slice_uniform_axes(AXES_ALL);
+        self.lava_noise.slice_uniform_axes(AXES_ALL);
+        self.temperature.slice_uniform_axes(AXES_ALL);
+        self.vegetation.slice_uniform_axes(AXES_ALL);
+        self.continents.slice_uniform_axes(AXES_ALL);
+        self.erosion.slice_uniform_axes(AXES_ALL);
+        self.depth.slice_uniform_axes(AXES_ALL);
+        self.ridges.slice_uniform_axes(AXES_ALL);
+        self.preliminary_surface_level.slice_uniform_axes(AXES_ALL);
+        self.final_density.slice_uniform_axes(AXES_ALL);
+        self.vein_toggle.slice_uniform_axes(AXES_ALL);
+        self.vein_ridged.slice_uniform_axes(AXES_ALL);
+        self.vein_gap.slice_uniform_axes(AXES_ALL);
+    }
+
     fn optimize(&mut self) {
         self.barrier_noise.optimize();
         self.fluid_level_floodedness_noise.optimize();
@@ -1744,6 +2022,7 @@ impl NoiseRouterRepr {
 
     fn into_token_stream_compiled(mut self, dim_name: &str) -> (TokenStream, TokenStream) {
         self.optimize();
+        self.slice_uniform_axes();
 
         let mut noise_component_stack = Vec::new();
         let mut noise_nodes = Vec::new();
@@ -2468,20 +2747,22 @@ fn parse_vanilla_df(base_df_dir: &std::path::Path, val: &serde_json::Value) -> D
                 "beardifier" => DensityFunctionRepr::Beardifier,
                 "cache" | "interpolated" | "flat_cache" | "cache_flat" | "cache_2d"
                 | "cache_once" | "cache_all_in_cell" => {
-                    let wrapper = match clean_type {
-                        "interpolated" => WrapperType::Interpolated,
-                        "flat_cache" | "cache_flat" => WrapperType::CacheFlat,
-                        "cache_2d" => WrapperType::Cache2D,
-                        "cache_once" | "cache" => WrapperType::CacheOnce,
-                        "cache_all_in_cell" => WrapperType::CellCache,
-                        _ => unreachable!(),
-                    };
                     let input = parse_vanilla_df(
                         base_df_dir,
                         obj.get("input")
                             .or_else(|| obj.get("argument"))
                             .expect("Missing input/argument"),
                     );
+                    let wrapper = match clean_type {
+                        "interpolated" => WrapperType::Interpolated,
+                        "flat_cache" | "cache_flat" => WrapperType::CacheFlat,
+                        "cache_2d" => WrapperType::Cache2D,
+                        "cache_once" => WrapperType::CacheOnce,
+                        "cache" if input.domain_axes() & AXIS_Y == 0 => WrapperType::CacheFlat,
+                        "cache" => WrapperType::CacheOnce,
+                        "cache_all_in_cell" => WrapperType::CellCache,
+                        _ => unreachable!(),
+                    };
                     DensityFunctionRepr::Wrapper {
                         input: Box::new(input),
                         wrapper,
