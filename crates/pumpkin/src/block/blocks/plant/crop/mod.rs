@@ -19,6 +19,7 @@ pub mod beetroot;
 pub mod carrot;
 pub mod gourds;
 pub mod nether_wart;
+pub mod pitcher_crop;
 pub mod potatoes;
 pub mod sweet_berry_bush;
 pub mod torch_flower;
@@ -72,12 +73,27 @@ trait CropBlockBase: PlantBlockBase {
             let f = get_available_moisture(world, pos, block);
             if rand::rng().random_range(0..=(25.0 / f).floor() as i64) == 0 {
                 let new_state_id = self.state_with_age(block, state, age + 1);
-                world.set_block_state(pos, new_state_id, BlockFlags::NOTIFY_LISTENERS);
+                if let Some(server) = world.server.upgrade() {
+                    let mut event =
+                        crate::plugin::api::events::block::block_grow::BlockGrowEvent::new(
+                            world.clone(),
+                            block,
+                            state,
+                            block,
+                            new_state_id,
+                            *pos,
+                        );
+                    server.plugin_manager.fire_blocking(&server, &mut event);
+                    if event.cancelled {
+                        return;
+                    }
+                    world.set_block_state(pos, event.new_state_id, BlockFlags::NOTIFY_LISTENERS);
+                } else {
+                    world.set_block_state(pos, new_state_id, BlockFlags::NOTIFY_LISTENERS);
+                }
             }
         }
     }
-
-    //TODO add impl for light level
 }
 
 pub fn get_available_moisture(world: &World, pos: &BlockPos, block: &Block) -> f32 {
