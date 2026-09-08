@@ -36,6 +36,7 @@ use pumpkin_data::{
     Enchantment,
     data_component_impl::{EquipmentSlot, EquipmentType, EquippableImpl},
     screen::WindowType,
+    sound::Sound,
     statistic::StatisticCategory,
 };
 use pumpkin_protocol::{
@@ -135,6 +136,11 @@ pub trait InventoryPlayer: Send + Sync {
     /// Checks if the player is in creative mode.
     fn is_creative(&self) -> bool;
 
+    /// Checks if the player is in spectator mode.
+    fn is_spectator(&self) -> bool {
+        false
+    }
+
     /// Gets the player's experience level.
     fn experience_level(&self) -> i32;
 
@@ -182,6 +188,9 @@ pub trait InventoryPlayer: Send + Sync {
 
     /// Increments a statistic for the player.
     fn increment_stat(&self, category: StatisticCategory, stat_id: i32, amount: i32);
+
+    /// Plays a block sound at the open container position.
+    fn play_block_sound(&self, sound: Sound, pitch: f32);
 
     /// Fires a prepare item enchant event. Returns true if cancelled.
     fn fire_prepare_item_enchant_event(
