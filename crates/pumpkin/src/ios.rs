@@ -182,7 +182,17 @@ pub extern "C" fn pumpkin_start(data_dir: *const c_char) {
             }
         }
 
-        let server = match PumpkinServer::new(config.basic, config.advanced, vanilla_data).await {
+        // `config.telemetry` is passed through as loaded. Upstream defaults it to
+        // enabled, which means an outbound heartbeat from a phone app; whether
+        // the embedder wants that is its call, not this merge's.
+        let server = match PumpkinServer::new(
+            config.basic,
+            config.advanced,
+            config.telemetry,
+            vanilla_data,
+        )
+        .await
+        {
             Ok(server) => server,
             Err(e) => {
                 buffer_log_line(format!("ERROR Cannot start server: {e}"));
