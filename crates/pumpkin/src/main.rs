@@ -49,6 +49,10 @@ static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
 async fn main() {
     let _ = MAIN_THREAD.set(thread::current().id());
 
+    // reqwest is built with `rustls-no-provider`, so pick the ring provider (the one
+    // wasmtime-wasi-http/rtc already force) before any client can be constructed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Initialize global Rayon thread pool with named worker threads
     let _ = rayon::ThreadPoolBuilder::new()
         .thread_name(|i| format!("Rayon-Worker-{i}"))
@@ -119,7 +123,13 @@ async fn main() {
     // The standalone binary exits on a bind failure, as it always has. The
     // decision moved out of `PumpkinServer::new` so that embedded hosts, which
     // cannot survive `process::exit`, can handle it themselves.
-    let Ok(pumpkin_server) = PumpkinServer::new(config.basic, config.advanced, vanilla_data).await
+    let Ok(pumpkin_server) = PumpkinServer::new(
+        config.basic,
+        config.advanced,
+        config.telemetry,
+        vanilla_data,
+    )
+    .await
     else {
         std::process::exit(1)
     };
@@ -329,15 +339,17 @@ async fn setup_sighandler() -> io::Result<()> {
 // Unix signal handling
 #[cfg(unix)]
 async fn setup_sighandler() -> io::Result<()> {
-    if signal(SignalKind::interrupt())?.recv().await.is_some() {
-        handle_interrupt();
-    }
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    let mut terminate = signal(SignalKind::terminate())?;
 
-    if signal(SignalKind::hangup())?.recv().await.is_some() {
-        handle_interrupt();
-    }
+    let received = tokio::select! {
+        received = interrupt.recv() => received,
+        received = hangup.recv() => received,
+        received = terminate.recv() => received,
+    };
 
-    if signal(SignalKind::terminate())?.recv().await.is_some() {
+    if received.is_some() {
         handle_interrupt();
     }
 

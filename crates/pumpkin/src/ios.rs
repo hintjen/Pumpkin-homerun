@@ -182,7 +182,14 @@ pub extern "C" fn pumpkin_start(data_dir: *const c_char) {
             }
         }
 
-        let server = match PumpkinServer::new(config.basic, config.advanced, vanilla_data).await {
+        let server = match PumpkinServer::new(
+            config.basic,
+            config.advanced,
+            config.telemetry,
+            vanilla_data,
+        )
+        .await
+        {
             Ok(server) => server,
             Err(e) => {
                 buffer_log_line(format!("ERROR Cannot start server: {e}"));
