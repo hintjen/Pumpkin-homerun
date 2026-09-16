@@ -44,16 +44,18 @@ existing.
 
 ## Building
 
-Clone with submodules. `crates/pumpkin-plugin-wit` is one, and without it
-`wit_bindgen::generate!` has no WIT definitions to read, which surfaces as
-three hundred unresolved-import errors in `pumpkin-plugin-api` rather than as
-anything mentioning submodules.
+A plain clone is enough — this tree has no submodules.
+`crates/pumpkin-plugin-wit` used to be one, but upstream vendored it as an
+ordinary subtree, so the WIT definitions `wit_bindgen::generate!` reads are
+now checked in directly.
 
 ```bash
-git clone --recurse-submodules https://github.com/hintjen/Pumpkin.git
-# already cloned:
-git submodule update --init --recursive
+git clone https://github.com/hintjen/Pumpkin.git
 ```
+
+If you have an older checkout where that path is still a populated submodule,
+run `git submodule deinit -f crates/pumpkin-plugin-wit` before pulling, or the
+merge will refuse to overwrite it.
 
 The checks this tree is expected to pass:
 

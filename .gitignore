@@ -111,6 +111,7 @@ data/*
 # project's configurations
 pumpkin.toml
 nethernet-key.der
+.pumpkin-server-id
 
 
 *.local.nbt
@@ -150,6 +151,7 @@ whitelist.json
 .console_history
 bukkit.yml
 commands.yml
+/config/
 help.yml
 permissions.yml
 spigot.yml
@@ -165,3 +167,5 @@ xcuserdata/
 # iOS web UI build artifacts
 ios/webapp/node_modules/
 ios/webapp/dist/
+
+minecraft-sources*/
