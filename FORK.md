@@ -35,11 +35,12 @@ existing.
 
 | Where | Change | Why |
 |---|---|---|
-| `crates/pumpkin/src/lib.rs` | `PumpkinServer::new` returns `Result<Self, io::Error>` instead of calling `process::exit(1)` on a bind failure | The standalone binary still decides to exit — it just decides it itself. An embedder can report the error instead of dying. |
+| `crates/pumpkin-core/src/lib.rs` | `PumpkinServer::new` returns its error instead of calling `process::exit(1)` on a TCP or Bedrock UDP bind failure | The standalone binary still decides to exit — it just decides it itself. An embedder can report the error instead of dying. |
+| `crates/pumpkin/src/lib.rs` | A library target, built as `rlib` and `staticlib`, holding the two modules below | The iOS entry points need both `pumpkin-core` and `pumpkin-wasm-host`, and only this crate depends on both. |
 | `crates/pumpkin/src/log_ring.rs` | A bounded in-memory log ring | stdout is invisible on both mobile platforms, so the console has to be readable from memory. |
 | `crates/pumpkin/src/ios.rs` | iOS entry points | — |
-| `crates/pumpkin/src/plugin/` | The native (`dlopen`) plugin loader is compiled out on iOS; the WASM loader stays | iOS does not permit loading unsigned native code. |
-| `plugin/loader/wasm/wasm_host/` | wasmtime on the Pulley interpreter | iOS does not permit JIT. |
+| `crates/pumpkin-core/src/plugin/` | The native (`dlopen`) plugin loader is compiled out on iOS; the WASM loader stays | iOS does not permit loading unsigned native code. |
+| `crates/pumpkin-wasm-host/src/runtime.rs` | wasmtime on the Pulley interpreter | iOS does not permit JIT. |
 | `reset_server_state()`, `STOP_INTERRUPT` as `ArcSwap` | Process-wide statics made safe to run twice | A second run in the same process saw the first run's stop request and exited immediately, which looks exactly like "the server won't start". |
 
 ## Building

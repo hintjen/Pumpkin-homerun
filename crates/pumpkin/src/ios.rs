@@ -6,11 +6,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pumpkin_config::{LoadConfiguration, PumpkinConfig};
+use pumpkin_core::crash::{CrashReport, FullBacktrace};
+use pumpkin_core::plugin::loader::PluginLoader;
+use pumpkin_core::server::Server;
+use pumpkin_core::{PumpkinServer, data::VanillaData, init_logger, stop_server};
+use pumpkin_wasm_host::WasmPluginLoader;
 
-use crate::crash::{CrashReport, FullBacktrace};
 use crate::log_ring::LogRing;
-use crate::server::Server;
-use crate::{PumpkinServer, data::VanillaData, init_logger, stop_server};
 
 static LOG_BUFFER: LazyLock<Mutex<LogRing>> = LazyLock::new(|| Mutex::new(LogRing::new()));
 static LOG_CAPTURE_STARTED: AtomicBool = AtomicBool::new(false);
@@ -137,7 +139,7 @@ pub extern "C" fn pumpkin_free_string(ptr: *mut c_char) {
 #[unsafe(no_mangle)]
 pub extern "C" fn pumpkin_start(data_dir: *const c_char) {
     // Reset statics so the server can start again after a previous run.
-    crate::reset_server_state();
+    pumpkin_core::reset_server_state();
     start_log_capture();
     install_panic_hook();
 
@@ -182,11 +184,17 @@ pub extern "C" fn pumpkin_start(data_dir: *const c_char) {
             }
         }
 
+        // Only the wasm loader: native (dlopen) plugins are compiled out on iOS.
+        let plugin_loaders: Vec<Arc<dyn PluginLoader>> = vec![Arc::new(WasmPluginLoader::new(
+            config.advanced.plugins.verify_signatures,
+        ))];
+
         let server = match PumpkinServer::new(
             config.basic,
             config.advanced,
             config.telemetry,
             vanilla_data,
+            plugin_loaders,
         )
         .await
         {

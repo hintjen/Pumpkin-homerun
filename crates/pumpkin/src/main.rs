@@ -21,19 +21,22 @@ use tokio::signal::ctrl_c;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
-use pumpkin::{
+use pumpkin_core::{
     CRASH_REPORT, SERVER_EXIT_CODE, SERVER_IS_STOPPING,
     crash::{CrashReport, FullBacktrace},
     data::VanillaData,
     stop_or_exit_server,
 };
-use pumpkin::{PumpkinServer, stop_server};
+use pumpkin_core::{PumpkinServer, stop_server};
 
 use pumpkin_config::{LoadConfiguration, PumpkinConfig};
+use pumpkin_core::plugin::loader::PluginLoader;
 use pumpkin_util::text::{
     TextComponent,
     color::{Color, NamedColor},
 };
+use pumpkin_wasm_host::WasmPluginLoader;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -71,7 +74,7 @@ async fn main() {
 
     let vanilla_data = VanillaData::load();
 
-    pumpkin::init_logger(&config.advanced);
+    pumpkin_core::init_logger(&config.advanced);
 
     info!(
         "{}",
@@ -120,19 +123,25 @@ async fn main() {
         }
     });
 
+    let plugin_loaders: Vec<Arc<dyn PluginLoader>> = vec![Arc::new(WasmPluginLoader::new(
+        config.advanced.plugins.verify_signatures,
+    ))];
+
     // The standalone binary exits on a bind failure, as it always has. The
     // decision moved out of `PumpkinServer::new` so that embedded hosts, which
     // cannot survive `process::exit`, can handle it themselves.
-    let Ok(pumpkin_server) = PumpkinServer::new(
+    let pumpkin_server = PumpkinServer::new(
         config.basic,
         config.advanced,
         config.telemetry,
         vanilla_data,
+        plugin_loaders,
     )
     .await
-    else {
-        std::process::exit(1)
-    };
+    .unwrap_or_else(|error| {
+        tracing::error!("Failed to start the server: {error}");
+        exit(1);
+    });
     let plugin_wait_time = pumpkin_server.init_plugins().await;
 
     let time_elapsed = time.elapsed().saturating_sub(plugin_wait_time);
