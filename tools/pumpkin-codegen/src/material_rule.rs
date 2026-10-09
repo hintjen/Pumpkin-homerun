@@ -279,8 +279,8 @@ impl ToTokens for MaterialConditionStruct {
                 false_at_and_above,
             } => {
                 let bytes = md5::compute(random_name.as_bytes());
-                let lo = u64::from_le_bytes(bytes[0..8].try_into().expect("incorrect length"));
-                let hi = u64::from_le_bytes(bytes[8..16].try_into().expect("incorrect length"));
+                let lo = u64::from_be_bytes(bytes[0..8].try_into().expect("incorrect length"));
+                let hi = u64::from_be_bytes(bytes[8..16].try_into().expect("incorrect length"));
                 tokens.extend(quote!(
                     MaterialCondition::VerticalGradient(VerticalGradientMaterialCondition {
                         random_lo: #lo,
@@ -539,10 +539,9 @@ pub fn resolve_rule(
 /// Reads material_rule files and resolves conditions from material_condition folder.
 pub fn build() -> TokenStream {
     let rule_dir =
-        std::path::Path::new("../../assets/datapacks/26_2/data/minecraft/worldgen/material_rule");
-    let cond_dir = std::path::Path::new(
-        "../../assets/datapacks/26_2/data/minecraft/worldgen/material_condition",
-    );
+        std::path::Path::new("../../assets/datapack/data/minecraft/worldgen/material_rule");
+    let cond_dir =
+        std::path::Path::new("../../assets/datapack/data/minecraft/worldgen/material_condition");
 
     let top_level_rules = [
         "bedrock_floor",

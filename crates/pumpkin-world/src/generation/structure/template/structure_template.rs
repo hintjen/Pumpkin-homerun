@@ -209,6 +209,7 @@ pub struct StructureTemplate {
     pub entity_info_list: Vec<StructureEntityInfo>,
     pub size: Vector3<i32>,
     pub author: String,
+    pub name: Option<String>,
 
     // Backward-compatible fields
     // TODO: make these fields private with accessors. They are public now, so a
@@ -308,26 +309,29 @@ impl PaletteEntry {
     #[must_use]
     pub fn to_nbt_compound(&self) -> NbtCompound {
         let mut compound = NbtCompound::new();
-        compound.put_string("Name", self.name.clone());
+        compound.put_string("id", self.name.clone());
         if !self.properties.is_empty() {
             let mut props = NbtCompound::new();
             for (k, v) in &self.properties {
                 props.put_string(k, v.clone());
             }
-            compound.put_compound("Properties", props);
+            compound.put_compound("properties", props);
         }
         compound
     }
 
     /// Deserializes a palette entry from an NBT compound tag.
     pub fn from_nbt_compound(entry_compound: &NbtCompound) -> Result<Self, TemplateError> {
+        // 26.3 renamed the palette keys from Name and Properties to id and properties
         let name = entry_compound
-            .get_string("Name")
-            .ok_or(TemplateError::MissingField("palette.Name"))?
+            .get_string("id")
+            .or_else(|| entry_compound.get_string("Name"))
+            .ok_or(TemplateError::MissingField("palette.id"))?
             .to_string();
 
         let properties: Vec<(String, String)> = entry_compound
-            .get_compound("Properties")
+            .get_compound("properties")
+            .or_else(|| entry_compound.get_compound("Properties"))
             .map_or_else(Vec::new, |props_compound| {
                 props_compound
                     .child_tags
@@ -589,6 +593,13 @@ impl StructureTemplate {
         &self
             .jigsaw_blocks_cache
             .get_or_init(|| {
+                if let Some(name) = &self.name
+                    && let Some(meta) =
+                        pumpkin_data::structure_metadata::StaticStructureMetadataList::get(name)
+                {
+                    return JigsawBlockCache(meta.jigsaws.iter().map(JigsawBlock::from).collect());
+                }
+
                 JigsawBlockCache(
                     self.blocks
                         .iter()
@@ -931,6 +942,90 @@ impl StructureTemplate {
     pub fn from_nbt_compound(compound: &NbtCompound) -> Result<Self, TemplateError> {
         let mut template = Self::default();
         template.load(compound)?;
+        Ok(template)
+    }
+
+    /// Loads a structure template from a pre-parsed static template definition.
+    pub fn from_static(
+        static_template: &pumpkin_data::structure_template::StaticStructureTemplate,
+    ) -> Result<Self, TemplateError> {
+        let size = Vector3::new(
+            static_template.size[0],
+            static_template.size[1],
+            static_template.size[2],
+        );
+        let author = static_template.author.to_string();
+
+        let mut entity_info_list = Vec::with_capacity(static_template.entities.len());
+        for e in static_template.entities {
+            let mut cursor = Cursor::new(e.nbt);
+            let mut reader = pumpkin_nbt::deserializer::NbtReadHelperJava::new(&mut cursor);
+            let nbt = pumpkin_nbt::Nbt::read_unnamed(&mut reader)
+                .map(|n| n.root_tag)
+                .unwrap_or_default();
+            entity_info_list.push(StructureEntityInfo::new(
+                Vector3::new(e.pos[0], e.pos[1], e.pos[2]),
+                Vector3::new(e.block_pos[0], e.block_pos[1], e.block_pos[2]),
+                nbt,
+            ));
+        }
+
+        let mut block_entities_map =
+            std::collections::HashMap::with_capacity(static_template.block_entities.len());
+        for be in static_template.block_entities {
+            let mut cursor = Cursor::new(be.nbt);
+            let mut reader = pumpkin_nbt::deserializer::NbtReadHelperJava::new(&mut cursor);
+            let nbt = pumpkin_nbt::Nbt::read_unnamed(&mut reader)
+                .map(|n| n.root_tag)
+                .unwrap_or_default();
+            block_entities_map.insert(be.pos, nbt);
+        }
+
+        let block_count = static_template.packed_blocks.len() / 4;
+        let mut palettes = Vec::with_capacity(static_template.palettes.len());
+
+        for static_palette in static_template.palettes {
+            let palette_entries: Vec<PaletteEntry> = static_palette
+                .iter()
+                .map(|p| {
+                    PaletteEntry::with_properties(
+                        p.name.to_string(),
+                        p.properties
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect(),
+                    )
+                })
+                .collect();
+
+            let mut block_info_list = Vec::with_capacity(block_count);
+            for chunk in static_template.packed_blocks.as_chunks::<4>().0 {
+                let pos = Vector3::new(chunk[0] as i32, chunk[1] as i32, chunk[2] as i32);
+                let state_idx = chunk[3] as usize;
+                let state = if state_idx < palette_entries.len() {
+                    palette_entries[state_idx].clone()
+                } else {
+                    PaletteEntry::new("minecraft:air".to_string())
+                };
+                let nbt = block_entities_map.get(&[pos.x, pos.y, pos.z]).cloned();
+                block_info_list.push(StructureBlockInfo::new(pos, state, nbt));
+            }
+            palettes.push(Palette::new(block_info_list));
+        }
+
+        let mut template = Self {
+            palettes,
+            entity_info_list,
+            size,
+            author,
+            name: None,
+            palette: Vec::new(),
+            blocks: Vec::new(),
+            entities: Vec::new(),
+            jigsaw_blocks_cache: OnceLock::new(),
+        };
+
+        template.sync_legacy_fields();
         Ok(template)
     }
 
@@ -1343,5 +1438,28 @@ mod tests {
             ],
         );
         assert_eq!(entry_with_props.properties.len(), 2);
+    }
+
+    /// Loads a real template from the shipped 26.3 datapack, which names the palette keys id and
+    /// properties instead of Name and Properties.
+    #[test]
+    fn load_26_3_template() {
+        let bytes = include_bytes!(
+            "../../../../../../assets/datapack/data/minecraft/structure/igloo/top.nbt"
+        );
+        let template = StructureTemplate::from_nbt_bytes(bytes).expect("failed to load template");
+
+        let palette = &template.palette;
+        assert!(!palette.is_empty(), "the palette must not be empty");
+        assert!(
+            palette.iter().any(|entry| entry.name == "minecraft:ice"),
+            "the palette must keep the block names"
+        );
+        assert!(
+            palette
+                .iter()
+                .any(|entry| !entry.properties.is_empty() && entry.name.contains("trapdoor")),
+            "the palette must keep the block properties"
+        );
     }
 }
